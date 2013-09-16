@@ -1,3 +1,8 @@
+// Package main in mcpulimit is a multi-process cpu-limiting program
+//
+// Copyright 2013 The Agostle Authors. All rights reserved.
+// Use of this source code is governed by an Apache 2.0
+// license that can be found in the LICENSE file.
 package main
 
 import (
@@ -6,14 +11,24 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
+var (
+	fExe     = flag.String("e", "", "the name of the executable to watch and limit")
+	fLimit   = flag.Int("l", 50, "the percent (between 1 and 100) to limit the processes CPU usage to")
+	fTimeout = flag.Int("t", 0, "timeout (seconds) to exit after if there is no suitable target process (lazy mode)")
+)
+
 func main() {
 	flag.Parse()
-	exe := flag.Arg(0)
+	exe := *fExe
+	if exe == "" {
+		exe = flag.Arg(0)
+	}
 	var err error
 	if exe[0] != '/' {
 		exe, err = exec.LookPath(exe)
@@ -21,6 +36,7 @@ func main() {
 			log.Fatalf("cannot find full path for %q: %s", exe, err)
 		}
 	}
+	oneSecond := time.Duration(1) * time.Second
 	procMap := make(map[int]*os.Process, 16)
 	mtx := sync.Mutex{}
 	go func() {
@@ -36,35 +52,47 @@ func main() {
 				}
 				mtx.Unlock()
 			}
-			time.Sleep(time.Duration(1) * time.Second)
+			time.Sleep(oneSecond)
 		}
 	}()
 
 	stopped := false
-	var sig os.Signal
-	var sleep time.Duration
-    tbd := make([]int, 0, 2)
-	run := time.Duration(250) * time.Millisecond
-	freeze := time.Duration(750) * time.Millisecond
+	var (
+		sig   os.Signal
+		sleep time.Duration
+		n     int64
+	)
+	tbd := make([]int, 0, 2)
+	run := time.Duration(10*(*fLimit)) * time.Millisecond
+	freeze := time.Duration(1000)*time.Millisecond - run
 	for {
 		mtx.Lock()
-		if stopped {
-			sig, stopped, sleep = syscall.SIGCONT, false, run
+		n = int64(len(procMap))
+		if n == 0 {
+			sleep = oneSecond
 		} else {
-			sig, stopped, sleep = syscall.SIGSTOP, true, freeze
-		}
-        tbd = tbd[:0]
-		for pid, p := range procMap {
-			if err = p.Signal(sig); err != nil {
-				log.Printf("error signaling %s: %s", pid, err)
-                tbd = append(tbd, pid)
+			if stopped {
+				sig, stopped, sleep = syscall.SIGCONT, false, time.Duration(int64(run)/n)
+			} else {
+				sig, stopped, sleep = syscall.SIGSTOP, true, freeze
+			}
+			tbd = tbd[:0]
+			for pid, p := range procMap {
+				if err = p.Signal(sig); err != nil {
+					if strings.HasSuffix(err.Error(), "no such process") {
+                        log.Printf("%d vanished.", pid)
+                    } else {
+						log.Printf("error signaling %d: %s", pid, err)
+					}
+					tbd = append(tbd, pid)
+				}
+			}
+			if len(tbd) > 0 {
+				for _, pid := range tbd {
+					delete(procMap, pid)
+				}
 			}
 		}
-        if len(tbd) > 0 {
-            for _, pid := range tbd {
-                delete(procMap, pid)
-            }
-        }
 		mtx.Unlock()
 		time.Sleep(sleep)
 	}
