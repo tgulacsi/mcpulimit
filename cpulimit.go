@@ -21,6 +21,7 @@ var (
 	fExe     = flag.String("e", "", "the name of the executable to watch and limit")
 	fLimit   = flag.Int("l", 50, "the percent (between 1 and 100) to limit the processes CPU usage to")
 	fTimeout = flag.Int("t", 0, "timeout (seconds) to exit after if there is no suitable target process (lazy mode)")
+	fPid     = flag.Int("p", 0, "pid of the process")
 )
 
 func main() {
@@ -29,64 +30,73 @@ func main() {
 	if *fExe != "" {
 		targets = append(targets, *fExe)
 	}
-	if flag.NArg() > 0 {
-		targets = append(targets, flag.Args()...)
-	}
 	var err error
-	for i, exe := range targets {
-		if exe[0] != '/' {
-			exe, err = exec.LookPath(exe)
-			if err != nil {
-				log.Printf("cannot find full path for %q: %s", exe, err)
-				continue
-			}
-			targets[i] = exe
-		}
-	}
 	oneSecond := time.Duration(1) * time.Second
-	procMap := make(map[int]*os.Process, 16)
 	mtx := sync.Mutex{}
-    running := true
-	go func() {
-		var (
-			ok        bool
-			null      struct{}
-			processes []*os.Process
-			oldpids   = make(map[int]struct{}, 16)
-            times int
-		)
-		for {
-			processes = getProcesses(processes[:0], targets)
-			if len(processes) == 0 {
-                if *fTimeout > 0 {
-                times++
-                if times > *fTimeout {
-                    log.Println("no more processes to watch, timeout reached - exiting.")
-                    running = false
-                    return
-                }}
-            } else {
-				mtx.Lock()
-				for k := range procMap {
-					oldpids[k] = null
-				}
-				for _, p := range processes {
-					if _, ok = procMap[p.Pid]; !ok {
-						log.Printf("new process %d", p.Pid)
-					}
-					procMap[p.Pid] = p
-					delete(oldpids, p.Pid)
-				}
-				for k := range oldpids {
-					log.Printf("%d exited", k)
-					delete(procMap, k)
-					delete(oldpids, k)
-				}
-				mtx.Unlock()
-			}
-			time.Sleep(oneSecond)
+	running := true
+	procMap := make(map[int]*os.Process, 16)
+	if *fPid > 0 {
+		var err error
+		if procMap[*fPid], err = os.FindProcess(*fPid); err != nil {
+			log.Fatalf("cannot find %d: %v", *fPid, err)
 		}
-	}()
+	} else {
+
+		if flag.NArg() > 0 {
+			targets = append(targets, flag.Args()...)
+		}
+		for i, exe := range targets {
+			if exe[0] != '/' {
+				exe, err = exec.LookPath(exe)
+				if err != nil {
+					log.Printf("cannot find full path for %q: %s", exe, err)
+					continue
+				}
+				targets[i] = exe
+			}
+		}
+		go func() {
+			var (
+				ok        bool
+				null      struct{}
+				processes []*os.Process
+				oldpids   = make(map[int]struct{}, 16)
+				times     int
+			)
+			for {
+				processes = getProcesses(processes[:0], targets)
+				if len(processes) == 0 {
+					if *fTimeout > 0 {
+						times++
+						if times > *fTimeout {
+							log.Println("no more processes to watch, timeout reached - exiting.")
+							running = false
+							return
+						}
+					}
+				} else {
+					mtx.Lock()
+					for k := range procMap {
+						oldpids[k] = null
+					}
+					for _, p := range processes {
+						if _, ok = procMap[p.Pid]; !ok {
+							log.Printf("new process %d", p.Pid)
+						}
+						procMap[p.Pid] = p
+						delete(oldpids, p.Pid)
+					}
+					for k := range oldpids {
+						log.Printf("%d exited", k)
+						delete(procMap, k)
+						delete(oldpids, k)
+					}
+					mtx.Unlock()
+				}
+				time.Sleep(oneSecond)
+			}
+		}()
+	}
 
 	stopped := false
 	var (
